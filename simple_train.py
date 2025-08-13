@@ -231,7 +231,7 @@ def train_model():
         model = nn.DataParallel(model)
     
     # Loss and optimizer
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore background
+    criterion = nn.CrossEntropyLoss()  # All classes 0-4 are semantic classes
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # Lists to store loss values
