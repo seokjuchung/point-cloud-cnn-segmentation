@@ -335,11 +335,11 @@ def train_hybrid_stage1_autoencoder():
     data_file = "/nevis/houston/home/sc5303/INSS_2025/INSS2025/data/train_xyze_1e4.h5"
     label_file = "/nevis/houston/home/sc5303/INSS_2025/INSS2025/data/train_label_1e4.h5"
     
-    batch_size = 8
+    batch_size = 128
     learning_rate = 0.001
-    num_epochs = 40
+    num_epochs = 256
     latent_dim = 256
-    early_stopping_patience = 12
+    early_stopping_patience = 32
     
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -456,10 +456,10 @@ def train_hybrid_stage2_binary():
     data_file = "/nevis/houston/home/sc5303/INSS_2025/INSS2025/data/train_xyze_1e4.h5"
     label_file = "/nevis/houston/home/sc5303/INSS_2025/INSS2025/data/train_label_1e4.h5"
     
-    batch_size = 16  # Can be larger since we have much less data
+    batch_size = 128  # Can be larger since we have much less data
     learning_rate = 0.001
-    num_epochs = 50
-    early_stopping_patience = 15
+    num_epochs = 256
+    early_stopping_patience = 16
     
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
