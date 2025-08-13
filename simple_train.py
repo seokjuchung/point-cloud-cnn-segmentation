@@ -195,7 +195,7 @@ def train_model():
     data_file = os.path.join(data_path, "train_xyze_1e4.h5")
     label_file = os.path.join(data_path, "train_label_1e4.h5")
     
-    batch_size = 64  # Start small due to memory constraints with 3D data
+    batch_size = 128  # Start small due to memory constraints with 3D data
     num_epochs = 10
     learning_rate = 0.001
     
