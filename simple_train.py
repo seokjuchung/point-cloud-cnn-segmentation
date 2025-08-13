@@ -189,6 +189,32 @@ def save_loss_curves(train_losses, val_losses, save_dir="results"):
         json.dump(loss_data, f, indent=2)
     print(f"Loss data saved to {save_dir}/loss_data.json")
 
+def calculate_class_weights(dataset, device):
+    """Calculate class weights based on actual data distribution"""
+    print("Calculating class weights from training data...")
+    
+    # Sample a subset of data to calculate class frequencies
+    class_counts = torch.zeros(5)
+    sample_size = min(1000, len(dataset))  # Sample 1000 or all if less
+    
+    for i in range(sample_size):
+        _, labels = dataset[i]
+        
+        # Convert to voxel labels (similar to inference)
+        # This is approximate - in practice you'd voxelize to get exact counts
+        for label_val in range(5):
+            class_counts[label_val] += (labels == label_val).sum().item()
+    
+    # Calculate weights (inverse frequency)
+    class_frequencies = class_counts / class_counts.sum()
+    class_weights = 1.0 / (class_frequencies + 1e-8)  # Add small epsilon to avoid division by zero
+    class_weights = class_weights / class_weights.min()  # Normalize
+    
+    print(f"Estimated class frequencies: {class_frequencies}")
+    print(f"Calculated class weights: {class_weights}")
+    
+    return class_weights.to(device)
+
 def train_model():
     # Configuration
     data_path = "data"
@@ -230,8 +256,11 @@ def train_model():
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
     
-    # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()  # All classes 0-4 are semantic classes
+    # Calculate class weights from training data
+    class_weights = calculate_class_weights(train_dataset, device)
+    
+    # Loss and optimizer with class weights
+    criterion = nn.CrossEntropyLoss(weight=class_weights)  # Apply class weights for imbalanced data
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # Lists to store loss values
