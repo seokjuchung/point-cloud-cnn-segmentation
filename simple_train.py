@@ -9,9 +9,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import time
 import os
+import matplotlib.pyplot as plt
+import json
 
 class PointCloudDataset(Dataset):
     def __init__(self, data_file, label_file):
@@ -140,6 +142,53 @@ def collate_fn(batch):
     
     return voxel_batch, label_batch
 
+def evaluate_model(model, dataloader, criterion, device):
+    """Evaluate model on validation set"""
+    model.eval()
+    total_loss = 0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for voxels, labels in dataloader:
+            voxels = voxels.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(voxels)
+            loss = criterion(outputs, labels)
+            
+            total_loss += loss.item()
+            num_batches += 1
+    
+    return total_loss / num_batches
+
+def save_loss_curves(train_losses, val_losses, save_dir="results"):
+    """Save loss curves as plot and JSON"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Plot loss curves
+    plt.figure(figsize=(10, 6))
+    epochs = range(1, len(train_losses) + 1)
+    plt.plot(epochs, train_losses, 'b-', label='Training Loss')
+    plt.plot(epochs, val_losses, 'r-', label='Validation Loss')
+    plt.title('Training and Validation Loss Curves')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(save_dir, 'loss_curves.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'loss_curves.pdf'), bbox_inches='tight')
+    print(f"Loss curves saved to {save_dir}/loss_curves.png and .pdf")
+    
+    # Save loss data as JSON
+    loss_data = {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'epochs': list(epochs)
+    }
+    with open(os.path.join(save_dir, 'loss_data.json'), 'w') as f:
+        json.dump(loss_data, f, indent=2)
+    print(f"Loss data saved to {save_dir}/loss_data.json")
+
 def train_model():
     # Configuration
     data_path = "data"
@@ -154,10 +203,23 @@ def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Create dataset and dataloader
+    # Create dataset
     dataset = PointCloudDataset(data_file, label_file)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                          collate_fn=collate_fn, num_workers=2)
+    
+    # Split dataset into train/val (9:1 ratio)
+    train_size = int(0.9 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], 
+                                             generator=torch.Generator().manual_seed(42))
+    
+    print(f"Training samples: {len(train_dataset)}")
+    print(f"Validation samples: {len(val_dataset)}")
+    
+    # Create dataloaders
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
+                                collate_fn=collate_fn, num_workers=2)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                              collate_fn=collate_fn, num_workers=2)
     
     # Create model
     model = Simple3DCNN(num_classes=5)
@@ -172,13 +234,20 @@ def train_model():
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore background
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
+    # Lists to store loss values
+    train_losses = []
+    val_losses = []
+    
+    print("Starting training...")
+    
     # Training loop
-    model.train()
     for epoch in range(num_epochs):
-        epoch_loss = 0
-        num_batches = 0
+        # Training phase
+        model.train()
+        epoch_train_loss = 0
+        num_train_batches = 0
         
-        for batch_idx, (voxels, labels) in enumerate(dataloader):
+        for batch_idx, (voxels, labels) in enumerate(train_dataloader):
             voxels = voxels.to(device)
             labels = labels.to(device)
             
@@ -191,21 +260,59 @@ def train_model():
             loss.backward()
             optimizer.step()
             
-            epoch_loss += loss.item()
-            num_batches += 1
+            epoch_train_loss += loss.item()
+            num_train_batches += 1
             
             if batch_idx % 10 == 0:
-                print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+                print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx}/{len(train_dataloader)}, Loss: {loss.item():.4f}')
         
-        avg_loss = epoch_loss / num_batches
-        print(f'Epoch {epoch+1}/{num_epochs} completed. Average Loss: {avg_loss:.4f}')
+        # Calculate average training loss
+        avg_train_loss = epoch_train_loss / num_train_batches
+        
+        # Validation phase
+        avg_val_loss = evaluate_model(model, val_dataloader, criterion, device)
+        
+        # Store losses
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
+        
+        print(f'Epoch {epoch+1}/{num_epochs} completed.')
+        print(f'  Training Loss: {avg_train_loss:.4f}')
+        print(f'  Validation Loss: {avg_val_loss:.4f}')
+        print()
         
         # Save checkpoint
         if (epoch + 1) % 5 == 0:
-            torch.save(model.state_dict(), f'model_epoch_{epoch+1}.pth')
-            print(f'Model saved at epoch {epoch+1}')
+            checkpoint_path = f'model_epoch_{epoch+1}.pth'
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': avg_val_loss,
+            }, checkpoint_path)
+            print(f'Checkpoint saved: {checkpoint_path}')
+    
+    # Save final model and loss curves
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'config': {
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'num_epochs': num_epochs,
+            'train_size': len(train_dataset),
+            'val_size': len(val_dataset)
+        }
+    }, 'final_model.pth')
+    
+    save_loss_curves(train_losses, val_losses)
+    
+    print("Training completed!")
+    print(f"Final Training Loss: {train_losses[-1]:.4f}")
+    print(f"Final Validation Loss: {val_losses[-1]:.4f}")
 
 if __name__ == "__main__":
     print("Starting Point Cloud Semantic Segmentation Training")
     train_model()
-    print("Training completed!")
