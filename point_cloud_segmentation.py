@@ -8,6 +8,8 @@ import numpy as np
 import os
 from tqdm import tqdm
 import time
+from collections import Counter
+from sklearn.metrics import f1_score, classification_report
 
 # Set device to use all available GPUs
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -141,16 +143,50 @@ def train_model():
     print("Loading dataset...")
     dataset = PointCloudDataset(data_path, label_path)
     
-    # Check number of classes by examining first few samples
-    print("Analyzing dataset to determine number of classes...")
+    # Check number of classes by examining more samples for better statistics
+    print("Analyzing dataset to determine number of classes and class distribution...")
     all_labels = []
-    for i in range(min(100, len(dataset))):  # Check first 100 samples
+    for i in range(min(1000, len(dataset))):  # Check first 1000 samples for better statistics
         _, labels = dataset[i]
         all_labels.extend(labels.numpy())
     
     num_classes = len(set(all_labels))
     print(f"Number of classes detected: {num_classes}")
     print(f"Classes: {sorted(set(all_labels))}")
+    
+    # Calculate class distribution and weights
+    class_counts = Counter(all_labels)
+    total_samples = len(all_labels)
+    
+    print("Class distribution:")
+    for class_id in sorted(class_counts.keys()):
+        count = class_counts[class_id]
+        percentage = count / total_samples * 100
+        print(f"  Class {class_id}: {count} samples ({percentage:.2f}%)")
+    
+    # Calculate class weights - inverse frequency with extra emphasis on class 2
+    class_weights = []
+    max_count = max(class_counts.values())
+    for class_id in range(num_classes):
+        if class_id in class_counts:
+            # Use inverse frequency weighting
+            weight = max_count / class_counts[class_id]
+            # Give extra weight to class 2 to improve its F1 score
+            if class_id == 2:
+                weight *= 2.0  # Double the weight for class 2
+            class_weights.append(weight)
+        else:
+            class_weights.append(1.0)
+    
+    # Normalize weights so they sum to num_classes
+    weight_sum = sum(class_weights)
+    class_weights = [w * num_classes / weight_sum for w in class_weights]
+    
+    print("Class weights (normalized):")
+    for i, weight in enumerate(class_weights):
+        print(f"  Class {i}: {weight:.3f}")
+    
+    class_weights_tensor = torch.FloatTensor(class_weights).to(device)
     
     # Split dataset into train/val
     train_size = int(0.8 * len(dataset))
@@ -177,14 +213,15 @@ def train_model():
     model = model.to(device)
     
     # Loss and optimizer
-    criterion = nn.CrossEntropyLoss(ignore_index=-1)  # Ignore padding tokens
+    criterion = nn.CrossEntropyLoss(ignore_index=-1, weight=class_weights_tensor)  # Use class weights
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
     
     # Training loop
-    num_epochs = 1024
+    num_epochs = 128
     best_val_loss = float('inf')
-    patience = 64
+    best_f1_class2 = 0.0  # Track best F1 score for class 2
+    patience = 16
     patience_counter = 0
     
     print("\nStarting training...")
@@ -274,17 +311,64 @@ def train_model():
         val_loss /= len(val_loader)
         val_acc = 100. * val_correct / val_total if val_total > 0 else 0
         
+        # Calculate F1 scores for validation set
+        model.eval()
+        all_predictions = []
+        all_true_labels = []
+        
+        with torch.no_grad():
+            for points, labels, masks in val_loader:
+                points = points.to(device)
+                labels = labels.to(device)
+                masks = masks.to(device)
+                
+                outputs = model(points)
+                _, predicted = torch.max(outputs, 2)
+                
+                # Flatten and apply masks
+                pred_flat = predicted.contiguous().view(-1)
+                labels_flat = labels.contiguous().view(-1)
+                mask_flat = masks.contiguous().view(-1)
+                
+                # Only keep non-padded predictions
+                valid_pred = pred_flat[mask_flat]
+                valid_labels = labels_flat[mask_flat]
+                
+                all_predictions.extend(valid_pred.cpu().numpy())
+                all_true_labels.extend(valid_labels.cpu().numpy())
+        
+        # Calculate F1 scores
+        f1_macro = f1_score(all_true_labels, all_predictions, average='macro')
+        f1_weighted = f1_score(all_true_labels, all_predictions, average='weighted')
+        f1_per_class = f1_score(all_true_labels, all_predictions, average=None)
+        
+        # Focus on class 2 F1 score
+        f1_class2 = f1_per_class[2] if len(f1_per_class) > 2 else 0.0
+        
         # Update learning rate
         scheduler.step()
         
         print(f'\nEpoch {epoch+1}/{num_epochs}:')
         print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
         print(f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
+        print(f'F1 Macro: {f1_macro:.4f}, F1 Weighted: {f1_weighted:.4f}')
+        print(f'F1 Class 2: {f1_class2:.4f} (target class)')
+        print(f'F1 per class: {[f"{f:.3f}" for f in f1_per_class]}')
         print(f'Learning Rate: {optimizer.param_groups[0]["lr"]:.6f}')
         
-        # Save best model and early stopping
-        if val_loss < best_val_loss:
+        # Save best model based on class 2 F1 score (with fallback to val_loss)
+        model_improved = False
+        if f1_class2 > best_f1_class2:
+            best_f1_class2 = f1_class2
+            best_val_loss = val_loss  # Update best val loss too
+            model_improved = True
+            save_reason = f'F1 Class 2: {f1_class2:.4f}'
+        elif f1_class2 == best_f1_class2 and val_loss < best_val_loss:
             best_val_loss = val_loss
+            model_improved = True
+            save_reason = f'Val Loss: {val_loss:.4f} (same F1 Class 2: {f1_class2:.4f})'
+        
+        if model_improved:
             patience_counter = 0
             torch.save({
                 'epoch': epoch,
@@ -292,9 +376,11 @@ def train_model():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'f1_class2': f1_class2,
+                'f1_per_class': f1_per_class.tolist(),
                 'num_classes': num_classes
             }, 'best_model.pth')
-            print(f'New best model saved with val_loss: {val_loss:.4f}')
+            print(f'New best model saved with {save_reason}')
         else:
             patience_counter += 1
             print(f'No improvement for {patience_counter}/{patience} epochs')
