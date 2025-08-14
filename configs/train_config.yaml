@@ -1,9 +1,0 @@
-learning_rate: 0.001
-batch_size: 32
-num_epochs: 50
-num_classes: 5
-input_shape: [None, 4]  # Assuming point clouds have 4 features (x, y, z, energy)
-model_save_path: "models/cnn_model.h5"
-validation_split: 0.2
-shuffle: true
-optimizer: "adam"
